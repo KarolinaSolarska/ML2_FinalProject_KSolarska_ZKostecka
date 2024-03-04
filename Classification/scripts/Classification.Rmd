@@ -1,0 +1,1258 @@
+---
+title: "Predicting Patient Survival in Critical Illnesses"
+author: "Karolina Solarska, Zuzanna Kostecka"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    theme: spacelab
+    highlight: tango
+    css: ../slides/css/script.css
+    toc: true
+    toc_float:
+      collapsed: false
+    smooth_scroll: true
+    include:
+      in_header: ../slides/css/header2.html
+      after_body: ../slides/css/footer.html
+  word_document:
+    toc: true
+  pdf_document:
+    toc: true
+subtitle: Machine Learning 2 Classification
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ############################################################################
+#           University of Warsaw, Faculty of Economic Sciences               #
+#                                                                            #
+#             Karolina Solarska, Zuzanna Kostecka                            #
+#                        Machine Learning 2                                  #
+#                          Classification                                    #
+#                                                                            #
+# ############################################################################
+```
+
+## Project Scope:
+The main objective of this project is to develop a classification model that identify the factors that contribute to in-hospital mortality and predict the likelihood of this outcome for patients.
+
+Dependent Variable:
+The dependent variable for the project is hospdead, a binary indicator representing whether a patient died in the hospital during their stay.        
+
+## 1. Understanding and Describing the Data
+
+First we loaded all necessary packages.
+
+```{r message = F, warning = F}
+
+packages <- c("fastDummies", "dplyr", "tidyr", "caret", "ggplot2", "DescTools", 
+              "corrplot", "rpart", "tidyverse", "MASS", "tree", "rpart.plot", 
+              "rattle", "pROC", "e1071", "randomForest", "ranger", 
+              "xgboost", "here")
+
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+lapply(packages, library, character.only = TRUE)
+
+source(here("data", "getAccuracyAndGini.R"))
+
+```
+
+Initial exploration of dataset.
+
+```{r}
+# setwd("C:/Users/karla/Desktop/Machine Learning 2/Projekt/Classification")
+# Load the dataset
+# data <- read.csv("data/c4.csv")
+
+data <- read.csv(here("data", "c4.csv"))
+
+# Check the structure of the dataset
+head(data)
+str(data)
+dim(data)
+summary(data)
+# View(data)
+
+```
+
+### 1.1 Dataset Description
+The dataset, 'c4.csv', contains comprehensive medical records of 10,105 critically ill patients admitted to five medical centers in the United States between 1989-1991 and 1992-1994. The patients are categorized into nine critical illness groups:
+
+Acute Respiratory Failure (ARF)
+Chronic Obstructive Pulmonary Disease (COPD)
+Congestive Heart Failure (CHF)
+Liver Disease
+Coma
+Colon Cancer
+Lung Cancer
+Multiple Organ System Failure with Malignancy (MOSF w/Malignancy)
+Multiple Organ System Failure with Sepsis (MOSF w/Sepsis)
+
+The dataset encompasses 56 variables that include demographic information (age, sex, race, income), clinical measurements (e.g., blood pressure, glucose levels, white blood cell count), and details about the severity and type of disease. This rich dataset offers a comprehensive view of the factors that might influence patient outcomes in a hospital setting.
+
+This project aims to leverage advanced machine learning techniques to analyze various factors influencing in-hospital mortality. The insights gleaned from this analysis can significantly aid healthcare providers in identifying high-risk patients, improving patient care, and managing hospital resources more effectively. Furthermore, the findings of this project could contribute to the broader field of healthcare analytics, supporting the movement towards data-driven decision-making in medicine. By accurately predicting in-hospital mortality, this project can help in devising strategies to improve patient outcomes and potentially save lives.
+
+### 1.2 Feature Selection
+```{r}
+
+# List of features to check for missing values
+missing_values <- colSums(is.na(data))
+print(missing_values)
+
+features_to_check <- c("alb", "avtisst", "bili", "bun", "charges", "crea",
+                       "dnr", "dnrday", "edu", "glucose", "hrt", "income",
+                       "meanbp", "pafi", "ph", "prg2m", "prg6m", "race",
+                       "resp", "sfdm2", "sod", "temp", "totcst", "totmcst",
+                       "urine", "wblc")
+
+missing_values <- sapply(data[features_to_check], function(x) sum(is.na(x)))
+missing_percentage <- sapply(data[features_to_check], function(x) mean(is.na(x)) * 100)
+missing_data_summary <- data.frame(Feature = features_to_check,
+                                   MissingValues = missing_values,
+                                   MissingPercentage = missing_percentage)
+print(missing_data_summary)
+
+# removal of unnecessary variables
+data <- subset(data, select = -c(id, adlp, adls, alb, aps, bili, bun, death, 
+                                 dzclass, glucose, income, pafi, ph, scoma,
+                                 sps, surv2m, surv6m, totcst, totmcst, urine))
+
+## surv2m, surv6m: features predicted by other models.
+## sps, aps, scoma: model-predicted scores 
+## d.time: our focus is solely on in-hospital mortality.
+# adlp, adls: correlated with sfdm2 (as said in data desciption)
+## death: focus on in-hospital mortality
+## dzclass: dzgroup is more specific variable
+## totcst, totmcst: charges is similar and has less missings
+## income, pafi, alb, bili, ph, glucose, bun, urine: very high missing data
+
+```
+
+### 1.3 Data Preprocessing
+
+Target Variable
+0 - represent patients who did not die in the hospital.
+1 - represent patients who did die in the hospital.
+```{r}
+
+# hospdead
+str(data$hospdead)
+sum(is.na(data$hospdead))
+unique(data$hospdead)
+
+# checking the distribution of hospdead
+summary(data$hospdead)
+table(data$hospdead)
+barplot(table(data$hospdead), main = "Distribution of Hospital Deaths", 
+        xlab = "Death in Hospital (1: Yes, 0: No)", 
+        ylab = "Count", 
+        col = c("blue", "red"), 
+        names.arg = c("Didn't die", "Did die"))
+
+```
+
+```{r}
+
+features_to_check2 <- c("avtisst", "ca", "charges", "crea", "dnr", "dzgroup",
+                        "edu", "hrt", "meanbp", "num.co", "prg2m", "prg6m",
+                        "race", "sfdm2", "sex", "temp", "wblc", "feat01", 
+                        "feat02", "feat03", "feat04", "feat05", "feat06", 
+                        "feat07", "feat08", "feat09", "feat10")
+
+for (feature in features_to_check2) {
+  cat("Feature:", feature, "\n")
+  cat("Class:", class(data[[feature]]), "\n")
+  cat("Number of NA values:", sum(is.na(data[[feature]])), "\n\n")
+}
+
+# changing types of features
+data$ca <- ifelse(data$ca == "yes", 1, 0)
+data$ca <- as.integer(data$ca)
+data$dnr <- ifelse(data$dnr == "no dnr", 1, ifelse(data$dnr %in% c("dnr after sadm", "dnr before sadm"), 0, NA))
+data$dnr <- as.integer(data$dnr)
+data$dementia <- as.integer(data$dementia)
+data$diabetes <- as.integer(data$diabetes)
+data$hrt <- as.integer(data$hrt)
+data$meanbp <- as.integer(data$meanbp)
+data$sex <- ifelse(data$sex == "male", 0, 1)
+data$sex <- as.integer(data$sex)
+data$sfdm2 <- as.integer(factor(data$sfdm2,
+                                   levels = c("no(M2 and SIP pres)",
+                                              "adl>=4 (>=5 if sur)",
+                                              "SIP>=30",
+                                              "Coma or Intub",
+                                              "<2 mo. follow-up"),
+                                   labels = c(1, 2, 3, 4, 5)))
+
+# handle with missing values
+data <- data[!is.na(data$dnr), ]
+data <- data[!is.na(data$hrt), ]
+data <- data[!is.na(data$meanbp), ]
+data <- data[!is.na(data$race), ]
+data <- data[!is.na(data$temp), ]
+data$avtisst[is.na(data$avtisst)] <- mean(data$avtisst, na.rm = TRUE)
+data$charges[is.na(data$charges)] <- mean(data$charges, na.rm = TRUE)
+data$crea[is.na(data$crea)] <- mean(data$crea, na.rm = TRUE)
+data$edu[is.na(data$edu)] <- Mode(data$edu[!is.na(data$edu)])
+data$prg2m[is.na(data$prg2m)] <- mean(data$prg2m, na.rm = TRUE)
+data$prg6m[is.na(data$prg6m)] <- mean(data$prg6m, na.rm = TRUE)
+data$sfdm2[is.na(data$sfdm2)] <- Mode(data$sfdm2[!is.na(data$sfdm2)])
+data$wblc[is.na(data$wblc)] <- mean(data$wblc, na.rm = TRUE)
+
+
+# changing as dummy variable
+data <- fastDummies::dummy_cols(
+  data, 
+  select_columns = c("dzgroup", "race"), 
+  remove_selected_columns = TRUE,
+)
+
+# changing column names
+data <- data %>%
+    rename(arf_w_sepsis = "dzgroup_ARF/MOSF w/Sepsis",
+           chp = "dzgroup_CHF",
+           cirrhosis = "dzgroup_Cirrhosis",
+           colon_cancer = "dzgroup_Colon Cancer",
+           coma = "dzgroup_Coma",
+           copd = "dzgroup_COPD",
+           lung_cancer = "dzgroup_Lung Cancer",
+           mosf_w_malig = "dzgroup_MOSF w/Malig",
+           )
+
+# removal of unnecessary variables
+data <- subset(data, select = -c(race_asian, race_black, race_hispanic, 
+                                 race_other))
+
+```
+
+```{r}
+
+# Check of missing values and data types after changes
+missing_values2 <- colSums(is.na(data))
+print(missing_values2)
+str(data)
+
+```
+
+### 1.4 Explanatory data analysis
+```{r}
+
+# Correlation Heatmap
+corrplot(cor(data[, sapply(data, is.numeric)]), method = "color")
+
+# Compute the correlation matrix
+correlation_matrix <- cor(data)
+print(correlation_matrix)
+
+# prg2m and prg6m are highly correlated (0.897), so physicians' 2-month and 6-month survival estimates are closely related. We decide to remove prg2m
+data <- subset(data, select = -c(prg2m))
+
+# avtisst and hospdead have a significant positive correlation (0.55), suggesting that higher AVTISS scores might be associated with increased hospital death rates. We will use a box plot to compare the distributions of avtisst scores for patients who died in the hospital versus those who did not.
+boxplot(data$avtisst ~ data$hospdead, main = "AVTISS Scores by Hospital Death Status", 
+        xlab = "Hospital Death (0: No, 1: Yes)", ylab = "AVTISS Score")
+cor_avtisst_hospdead <- cor.test(data$avtisst, data$hospdead, method = "pearson")
+print(cor_avtisst_hospdead)
+
+# charges and dnrday are highly correlated (0.602)
+plot(data$charges ~ data$dnrday, main = "Hospital Charges vs. Day of DNR Order",
+     xlab = "Day of DNR Order", ylab = "Hospital Charges")
+cor_charges_dnrday <- cor.test(data$charges, data$dnrday, method = "pearson")
+print(cor_charges_dnrday)
+
+# hospdead and sfdm2 are highly correlated (0.547)
+boxplot(data$sfdm2 ~ data$hospdead, main = "Functional Disability by Hospital Death Status", 
+        xlab = "Hospital Death (0: No, 1: Yes)", ylab = "Functional Disability (sfdm2)")
+
+
+
+```
+
+```{r}
+
+# Checking the distribution 
+
+# histograms for continuous variables
+par(mfrow = c(3, 3))
+hist(data$adlsc, main = "Imputed ADL Calibrated to Surrogate", xlab = "ADL Score", col = "blue")
+hist(data$age, main = "Age Distribution", xlab = "Age", col = "blue")
+hist(data$avtisst, main = "Average TISS Score", xlab = "TISS Score", col = "blue")
+hist(data$charges, main = "Hospital Charges", xlab = "Charges", col = "blue")
+hist(data$crea, main = "Serum Creatinine Levels", xlab = "Creatinine Levels", col = "blue")
+hist(data$dnrday, main = "Distribution of DNR Day", xlab = "Day of DNR Order", col = "blue")
+hist(data$edu, main = "Education levels", xlab = "Years of education", col = "blue")
+hist(data$hday, main = "Hospital Day at Entry", xlab = "Day", col = "blue")
+hist(data$hrt, main = "Heart Rate", xlab = "Heart Rate", col = "blue")
+hist(data$meanbp, main = "Mean Blood Pressure", xlab = "Blood Pressure", col = "blue")
+hist(data$num.co, main = "Number of Comorbidities", xlab = "Comorbidities", col = "blue")
+hist(data$prg6m, main = "Histogram of Physicians' 6-Month survival estimates", xlab = "Physician's 6-Month survival estimate", col = "blue")
+hist(data$resp, main = "Respiration Rate", xlab = "Respiration Rate", col = "blue")
+hist(data$sfdm2, main = "Functional Disability Levels", 
+     xlab = "Functional Disability Level (1-5 Scale)", col = "blue", 
+     breaks = 5)
+hist(data$sod, main = "Serum Sodium Concentration", xlab = "Sodium Concentration", col = "blue")
+hist(data$temp, main = "Temperature", xlab = "Temperature", col = "blue")
+hist(data$wblc, main = "White Blood Cell Count", xlab = "WBC Count", col = "blue")
+hist(data$feat01, main = "feat01", xlab = "feat01", col = "blue")
+hist(data$feat02, main = "feat02", xlab = "feat02", col = "blue")
+hist(data$feat03, main = "feat03", xlab = "feat03", col = "blue")
+hist(data$feat04, main = "feat04", xlab = "feat04", col = "blue")
+hist(data$feat05, main = "feat05", xlab = "feat05", col = "blue")
+hist(data$feat06, main = "feat06", xlab = "feat06", col = "blue")
+hist(data$feat07, main = "feat07", xlab = "feat07", col = "blue")
+hist(data$feat08, main = "feat08", xlab = "feat08", col = "blue")
+hist(data$feat09, main = "feat09", xlab = "feat09", col = "blue")
+hist(data$feat10, main = "feat10", xlab = "feat10", col = "blue")
+par(mfrow = c(1, 1))
+
+
+par(mfrow = c(3, 3))
+# bar plots for categorical variables
+barplot(table(data$ca), main = "Cancer Status", 
+        xlab = "Cancer Status (1: Yes, 0: No)", col = "blue", 
+        names.arg = c("No", "Yes"))
+barplot(table(data$dementia), main = "Dementia Distribution", xlab = "Dementia (0: No, 1: Yes)", col = "blue", names.arg = c("No", "Yes"))
+barplot(table(data$diabetes), main = "Diabetes Distribution", xlab = "Diabetes (0: No, 1: Yes)", col = "blue", names.arg = c("No", "Yes"))
+barplot(table(data$dnr), main = "DNR Status", 
+        xlab = "DNR Status (1: No DNR, 0: DNR)", col = "blue", 
+        names.arg = c("DNR", "No DNR"))
+barplot(table(data$race_white), main = "Race Distribution", xlab = "Race", col = "blue")
+barplot(table(data$sex), main = "Sex Distribution", 
+        xlab = "Sex (1: Female, 0: Male)", col = "blue", 
+        names.arg = c("Male", "Female"))
+barplot(table(data$arf_w_sepsis), main = "ARF/MOSF with Sepsis", 
+        xlab = "ARF/MOSF with Sepsis", col = "blue")
+barplot(table(data$chp), main = "CHP", 
+        xlab = "CHP", col = "blue")
+barplot(table(data$cirrhosis), main = "Cirrhosis", 
+        xlab = "Cirrhosis", col = "blue")
+barplot(table(data$colon_cancer), main = "Colon Cancer", 
+        xlab = "Colon Cancer", col = "blue")
+barplot(table(data$coma), main = "Coma", 
+        xlab = "Coma", col = "blue")
+barplot(table(data$copd), main = "Copd", 
+        xlab = "Copd", col = "blue")
+barplot(table(data$lung_cancer), main = "Lung Cancer", 
+        xlab = "Lung Cancer", col = "blue")
+barplot(table(data$mosf_w_malig), main = "MOSF w/Malig", 
+        xlab = "MOSF w/Malig", col = "blue")
+par(mfrow = c(1, 1))
+
+```
+
+```{r}
+
+# check for outliers
+par(mfrow = c(3, 3))
+
+# Boxplots for individual variables
+boxplot(data$adlsc, main = "ADLSC Distribution", ylab = "ADLSC")
+boxplot(data$age, main = "Age Distribution", ylab = "Age")
+boxplot(data$avtisst, main = "AVTISS Score", ylab = "AVTISS")
+boxplot(data$charges, main = "Hospital Charges", ylab = "Charges")
+boxplot(data$crea, main = "Serum Creatinine Levels", ylab = "Creatinine")
+boxplot(data$dnrday, main = "DNR Day", ylab = "Day of DNR")
+boxplot(data$edu, main = "Education levels", ylab = "Years of education")
+boxplot(data$hday, main = "Hospital Day at Entry", ylab = "Day")
+boxplot(data$hrt, main = "Heart Rate", ylab = "Heart Rate")
+boxplot(data$meanbp, main = "Mean Blood Pressure", ylab = "Blood Pressure")
+boxplot(data$num.co, main = "Number of Comorbidities", ylab = "Comorbidities")
+boxplot(data$prg6m, main = "Physicians' 6-Month survival estimates", ylab = "Physician's 6-Month survival estimate")
+boxplot(data$resp, main = "Respiration Rate", ylab = "Respiration Rate")
+boxplot(data$sod, main = "Serum Sodium Concentration", ylab = "Sodium Concentration")
+boxplot(data$temp, main = "Temperature", ylab = "Temperature")
+boxplot(data$wblc, main = "White Blood Cell Count", ylab = "WBC Count")
+par(mfrow = c(1, 1))
+
+```
+
+## 2.Model selection
+
+First, we divide data set into the training, validation and testing sample. 
+
+```{r}
+
+set.seed(123456789)
+
+# convert target variable from 0 and 1 to "No" and "Yes"
+data$hospdead <- factor(data$hospdead, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Split data into training (70%) and initial testing (30%)
+training_obs <- createDataPartition(data$hospdead, p = 0.7, list = FALSE)
+data_train <- data[training_obs,]
+data_test_initial <- data[-training_obs,]
+
+# Further split the initial testing data into actual testing and validation sets (50% each of initial testing data)
+testing_obs <- createDataPartition(data_test_initial$hospdead, p = 0.5, list = FALSE)
+data_test <- data_test_initial[testing_obs,]
+data_validation <- data_test_initial[-testing_obs,]
+
+```
+
+Examine frequencies of the target variable inside the training, validation and the testing set. 
+
+```{r}
+
+table(data_train$hospdead)/length(data_train$hospdead)
+table(data_test$hospdead)/length(data_test$hospdead)
+table(data_validation$hospdead)/length(data_validation$hospdead)
+
+```
+
+### 2.1. Decision trees
+```{r}
+
+# First, we define formula of the model
+model_1 <- hospdead ~ adlsc + age + avtisst + ca + charges + crea + 
+  dementia + diabetes + dnr + dnrday + edu + feat01 + feat02 + feat03 + 
+  feat04 + feat05 + feat06 + feat07 + feat08 + feat09 + feat10 + hday +
+  hrt + meanbp + num.co + prg6m + resp + sex + sfdm2 + sod + temp + wblc + 
+  arf_w_sepsis + chp + cirrhosis + colon_cancer + coma +copd + lung_cancer + 
+  mosf_w_malig + race_white
+
+# Next, we create the tree on the basis of all predictors. 
+tree_1 <- 
+  rpart(model_1,
+        data = data_train, 
+        method = "class")
+tree_1
+fancyRpartPlot(tree_1)
+summary(tree_1)
+
+```
+- The root node starts with 7015 observations suggesting that the 'do not resuscitate' order is a critical predictor for the outcome. It indicates a 74.7% probability for non-death (class 0) outcomes.
+- The second node, with a 'dnr' value ≥ 0.5, has a high probability (92.5%) of non-death outcomes, suggesting that patients with this characteristic are less likely to experience hospital death.
+- The third node, with 'dnr' < 0.5, leans towards death outcomes (58.9% probability), indicating a higher risk of hospital death when a 'dnr' order is not present.
+- Further splits are made based on 'avtisst', 'sfdm2', and 'dnrday', reflecting their relevance in the model. For instance, 'avtisst' < 44 and 'sfdm2' < 4 lead to nodes predicting non-death with high confidence.
+- One of the leaves uses 'feat03' < 0.56 as a splitting rule, which is less common in the tree, showing that it might have a specific but limited influence on the outcome prediction.
+
+The variable importance scores highlight the most influential predictors in the decision-making process, with 'dnr', 'sfdm2', 'dnrday', and 'avtisst' being the top variables.
+
+Now, we will try to do some alternative splits.
+
+SURROGATE SPLITS
+```{r}
+
+tree_2 <- 
+  rpart(model_1,
+        data = data_train,
+        method = "class",
+        parms = list(split = 'information'))
+
+tree_2
+fancyRpartPlot(tree_2)
+summary(tree_2)
+
+```
+In second tree 'sfdm2' taking the primary role in the decision process. This tree seems to have a more balanced distribution of splits, and  'dnr' and 'avtisst' also plays a significant role.
+
+STOPPING CRITERIA
+```{r}
+
+tree_3 <- 
+  rpart(model_1,
+        data = data_train,
+        method = "class",
+        minsplit = 700, 
+        minbucket = 70,
+        maxdepth = 6)
+
+tree_3
+fancyRpartPlot(tree_3)
+summary(tree_3)
+
+```
+It starts similarly to Tree 1 with 'dnr' but is more complex.
+
+TREE COMPLEXITY 
+```{r}
+
+tree_3a <- 
+  rpart(model_1,
+        data = data_train,
+        method = "class",
+        minsplit = 700, 
+        minbucket = 70,
+        maxdepth = 6,
+        cp = -1)
+
+tree_3a
+fancyRpartPlot(tree_3a)
+summary(tree_3a)
+
+```
+
+We will compare the results of tree number 3.
+```{r}
+
+# produce predictions on the training and testing sets
+pred_train_tree_3 <- predict(tree_3, data_train)
+pred_test_tree_3  <- predict(tree_3,  data_test)
+pred_train_tree_3a <- predict(tree_3a, data_train)
+pred_test_tree_3a  <- predict(tree_3a,  data_test)
+
+# ROC curve
+ROC.train_tree_3  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_3[, 1])
+ROC.test.tree_3  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_3[, 1])
+ROC.train_tree_3a  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_3a[, 1])
+ROC.test.tree_3a  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_3a[, 1])
+list(
+  ROC.train_tree_3 = ROC.train_tree_3,
+  ROC.test.tree_3 = ROC.test.tree_3,
+  ROC.train_tree_3a = ROC.train_tree_3a,
+  ROC.test.tree_3a = ROC.test.tree_3a
+) %>%
+  pROC::ggroc(alpha = 0.5, linetype = 1, size = 1) + 
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color = "grey", 
+               linetype = "dashed") +
+  labs(subtitle = paste0("Gini TRAIN: ",
+                         "tree_3 = ", 
+                         round(100*(2 * auc(ROC.train_tree_3) - 1), 1), "%, ",
+                         "tree_3a = ", 
+                         round(100*(2 * auc(ROC.train_tree_3a) - 1), 1), "% ",                      
+                         "\nGini TEST: ",
+                         "tree_3 = ", 
+                         round(100*(2 * auc(ROC.test.tree_3) - 1), 1), "%, ",
+                         "tree_3a = ", 
+                         round(100*(2 * auc(ROC.test.tree_3a) - 1), 1), "% "                     
+                         )) +
+  theme_bw() + coord_fixed() +
+  scale_color_brewer(palette = "Paired")
+
+
+
+
+
+```
+On the plot we can see that on both testing and training samples tree_3a has higher Gini coefficient (89.8% and 93% appropriately) than tree_3 (80.4% and 81.9%)
+
+PRUNING
+```{r}
+
+tree_4 <- 
+  rpart(model_1,
+        data = data_train,
+        method = "class",
+        minsplit = 150, 
+        minbucket = 70, 
+        maxdepth = 10, 
+        cp = -1)
+
+tree_4
+fancyRpartPlot(tree_4)
+summary(tree_4)
+
+```
+
+Now we will use it in prediction on training set.
+```{r}
+
+pred_tree_4 <- predict(tree_4, data_train, type = "class")
+head(pred_tree_4)
+
+# Analyzing the fit the model to the training set.
+confusionMatrix(data = pred_tree_4,
+                reference = as.factor(data_train$hospdead),
+                positive = "Yes") 
+
+```
+Confusion Matrix:
+True negatives (0 predicted as 0): 5045
+False negatives (1 predicted as 0): 382
+False positives (0 predicted as 1): 192
+True positives (1 predicted as 1): 1396
+
+About 91.82% of all predictions are correct
+
+The next step will be pruning the tree.
+```{r}
+
+printcp(tree_4)
+       
+# Find the number of cp row with lowest error
+opt <- which.min(tree_4$cptable[, "xerror"])
+opt
+
+# value of cp
+cp <- tree_4$cptable[opt, "CP"]
+cp
+
+```
+
+```{r}
+
+# using cp in process of tree pruning
+tree_4p <-  
+  prune(tree_4, cp = cp)
+
+tree_4p
+fancyRpartPlot(tree_4p)
+summary(tree_4p)
+
+```
+This is the most complex tree.
+
+We will compare the results of tree number 4.
+```{r}
+
+# produce predictions on the training and testing sets
+pred_train_tree_4 <- predict(tree_4, data_train)
+pred_test_tree_4  <- predict(tree_4,  data_test)
+pred_train_tree_4p <- predict(tree_4p, data_train)
+pred_test_tree_4p  <- predict(tree_4p,  data_test)
+
+# ROC curve
+ROC.train_tree_4  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_4[, 1])
+ROC.test.tree_4  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_4[, 1])
+ROC.train_tree_4p  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_4p[, 1])
+ROC.test.tree_4p  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_4p[, 1])
+
+list(
+  ROC.train_tree_4 = ROC.train_tree_4,
+  ROC.test.tree_4 = ROC.test.tree_4,
+  ROC.train_tree_4p = ROC.train_tree_4p,
+  ROC.test.tree_4p = ROC.test.tree_4p
+) %>%
+  pROC::ggroc(alpha = 0.5, linetype = 1, size = 1) + 
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color = "grey", 
+               linetype = "dashed") +
+  labs(subtitle = paste0("Gini TRAIN: ",
+                         "tree_4 = ", 
+                         round(100*(2 * auc(ROC.train_tree_4) - 1), 1), "%, ",
+                         "tree_4p = ", 
+                         round(100*(2 * auc(ROC.train_tree_4p) - 1), 1), "% ",                         
+                         "\nGini TEST: ",
+                         "tree_4 = ", 
+                         round(100*(2 * auc(ROC.test.tree_4) - 1), 1), "%, ",
+                         "tree_4p = ", 
+                         round(100*(2 * auc(ROC.test.tree_4p) - 1), 1), "% "
+                         )) +
+  theme_bw() + coord_fixed() +
+  scale_color_brewer(palette = "Paired")
+
+```
+So tree_4 performs a little bit better (Gini train = 95.3%) than tree after pruning. Testing and training sets
+perform similarly.
+
+Last step is to estimate the tree with the caret package.
+```{r}
+
+tc <- trainControl(method = "cv",
+                   number = 10, 
+                   classProbs = TRUE,
+                   summaryFunction = twoClassSummary)
+modelLookup("rpart")
+
+cp.grid <- expand.grid(cp = seq(0, 0.03, 0.001))
+set.seed(123456789)
+
+tree_5 <- 
+  train(model_1,
+        data = data_train, 
+        method = "rpart", 
+        metric = "ROC",
+        trControl = tc,
+        tuneGrid  = cp.grid)
+
+tree_5
+
+```
+
+At the end we will compare all the results.
+```{r}
+
+# produce predictions on the training and testing sets
+pred_train_tree_1  <- predict(tree_1,  data_train)
+pred_test_tree_1  <- predict(tree_1,  data_test)
+pred_train_tree_2 <- predict(tree_2, data_train)
+pred_test_tree_2  <- predict(tree_2,  data_test)
+pred_train_tree_3a <- predict(tree_3a, data_train)
+pred_test_tree_3a  <- predict(tree_3a,  data_test)
+pred_train_tree_4 <- predict(tree_4, data_train)
+pred_test_tree_4  <- predict(tree_4,  data_test)
+pred_train_tree_5 <- predict(tree_5, data_train)
+pred_test_tree_5  <- predict(tree_5,  data_test)
+
+# ROC curve
+ROC.train_tree_1  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_1[, 1])
+ROC.test.tree_1  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_1[, 1])
+ROC.train_tree_2  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_2[, 1])
+ROC.test.tree_2  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_2[, 1])
+ROC.train_tree_3a  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_3a[, 1])
+ROC.test.tree_3a  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_3a[, 1])
+ROC.train_tree_4  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_4[, 1])
+ROC.test.tree_4  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_4[, 1])
+ROC.train_tree_5  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                        pred_train_tree_4[, 1])
+ROC.test.tree_5  <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                        pred_test_tree_4[, 1])
+list(
+  ROC.train_tree_1  = ROC.train_tree_1,
+  ROC.test.tree_1 = ROC.test.tree_1,
+  ROC.train_tree_2 = ROC.train_tree_2,
+  ROC.test.tree_2 = ROC.test.tree_2,
+  ROC.train_tree_3a = ROC.train_tree_3a,
+  ROC.test.tree_3a = ROC.test.tree_3a,
+  ROC.train_tree_4 = ROC.train_tree_4,
+  ROC.test.tree_4 = ROC.test.tree_4,
+  ROC.train_tree_5 = ROC.train_tree_5,
+  ROC.test.tree_5 = ROC.test.tree_5
+) %>%
+  pROC::ggroc(alpha = 0.5, linetype = 1, size = 1) + 
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color = "grey", 
+               linetype = "dashed") +
+  labs(subtitle = paste0("Gini TRAIN: ",
+                         "tree_1 = ", 
+                         round(100*(2 * auc(ROC.train_tree_1) - 1), 1), "%, ",
+                         "tree_2 = ", 
+                         round(100*(2 * auc(ROC.train_tree_2) - 1), 1), "% ",
+                         "tree_3a = ", 
+                         round(100*(2 * auc(ROC.train_tree_3a) - 1), 1), "% ",                      
+                         "tree_4 = ", 
+                         round(100*(2 * auc(ROC.train_tree_4) - 1), 1), "%, ",
+                         "tree_5 = ", 
+                         round(100*(2 * auc(ROC.train_tree_5) - 1), 1), "%, ",                         
+                         "\nGini TEST: ",
+                         "tree_1 = ", 
+                         round(100*(2 * auc(ROC.test.tree_1) - 1), 1), "%, ",
+                         "tree_2 = ", 
+                         round(100*(2 * auc(ROC.test.tree_2) - 1), 1), "% ",
+                         "tree_3a = ", 
+                         round(100*(2 * auc(ROC.test.tree_3a) - 1), 1), "% ",                      
+                         "tree_4 = ", 
+                         round(100*(2 * auc(ROC.test.tree_4) - 1), 1), "%, ",
+                         "tree_5 = ", 
+                         round(100*(2 * auc(ROC.test.tree_5) - 1), 1), "%, "                         
+                         )) + 
+  theme_bw() + 
+  coord_fixed() + 
+  scale_color_brewer(palette = "Paired") + 
+  theme(
+    legend.position = "right"
+  )
+
+```
+
+We have got the model which is identical to the tree4.
+Based on the output tree_4 has the highest Gini coefficient.
+
+Final version of the model.
+```{r}
+
+dt_final <- tree_5$finalModel
+
+```
+
+
+Importance of predictors.
+```{r}
+
+dt_final.importance <- varImp(dt_final) %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  arrange(desc(Overall)) %>%
+  top_n(10, Overall)  
+
+par(mar = c(5, 8, 4, 2) + 0.1)
+
+barplot(
+  rev(dt_final.importance$Overall), 
+  names.arg = rev(dt_final.importance$variable), 
+  col = "grey40",  
+  main = "Top 10 important variables in final model",
+  horiz = TRUE,  
+  las = 1,  
+  cex.names = 0.6  
+)
+
+```
+
+dnr appears to be the most important predictor
+The next two important variables are avtisst and sfdm2
+prg6m, feat04, charges, dnrday, hday, feat05, coma also seem to be important
+
+### 2.2 Random Forests
+```{r}
+
+# running random forest function
+rf1 <- randomForest(model_1, data = data_train)
+print(rf1)
+plot(rf1)
+
+```
+A total of 500 trees were constructed.
+At each split in the construction of the trees, 6 predictor variables were tried.
+The out-of-bag (OOB) estimate of error rate is 6.66%, which is the estimated prediction error on the training data.
+
+Class error is lower for predictions of "no" value and higher for "Yes".
+
+In the plot, the black line represents the total OOB error rate. The red line shows prediction error for the 'Yes' class, and the green for the 'No' class. The convergence of these lines suggests that after approximately 50 trees, the model achieves stable performance and further gains are minimal.
+
+
+Trying to limit number of trees and estimate the model on bootstrap samples from the full data set. Also increasing and trying different numbers of predictors.
+```{r}
+
+rf2 <- 
+  randomForest(model_1,
+               data = data_train,
+               ntree = 50,
+               sampsize = nrow(data_train),
+               mtry = 12,
+               # minimum number of obs in the terminal nodes
+               nodesize = 50,
+               # we also generate predictors importance measures,
+               importance = TRUE)
+print(rf2)
+plot(rf2)
+
+```
+The OOB error is a little bit higher now.
+
+Then, optimizing the mtry parameter using the cross-validation process.
+```{r}
+
+parameters_rf <- expand.grid(mtry = 2:40)
+ctrl_oob <- trainControl(method = "oob", classProbs = TRUE)
+
+train.rf3 <-
+    train(model_1,
+          data = data_train,
+          method = "rf",
+          ntree = 50,
+          nodesize = 50,
+          tuneGrid = parameters_rf,
+          trControl = ctrl_oob,
+          importance = TRUE)
+
+train.rf3
+str(train.rf3)
+plot(train.rf3$results$mtry,
+     train.rf3$results$Accuracy, type = "b")
+
+```
+Based on outputs the optimal value of mtry should be 23.
+
+```{r}
+
+rf3<- 
+  randomForest(model_1,
+               data = data_train,
+               ntree = 50,
+               sampsize = nrow(data_train),
+               mtry = 23,
+               nodesize = 50,
+               importance = TRUE)
+str(rf3)
+plot(rf3)
+
+```
+
+Comparing all the models on the ROC curves.
+
+```{r}
+
+pred.train.rf1 <- predict(rf1, data_train, type = "prob")[, "Yes"]
+pred.test.rf1  <- predict(rf1, data_test, type = "prob")[, "Yes"]
+pred.train.rf2 <- predict(rf2, data_train, type = "prob")[, "Yes"]
+pred.test.rf2  <- predict(rf2, data_test, type = "prob")[, "Yes"]
+pred.train.rf3 <- predict(rf3, data_train, type = "prob")[, "Yes"]
+pred.test.rf3  <- predict(rf3, data_test, type = "prob")[, "Yes"]
+
+ROC.train.rf1  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                     pred.train.rf1)
+ROC.test.rf1   <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                     pred.test.rf1)
+ROC.train.rf2  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                      pred.train.rf2)
+ROC.test.rf2   <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                      pred.test.rf2)
+ROC.train.rf3  <- roc(as.numeric(data_train$hospdead == "Yes"), 
+                      pred.train.rf3)
+ROC.test.rf3   <- roc(as.numeric(data_test$hospdead == "Yes"), 
+                      pred.test.rf3)
+
+list(
+  ROC.train.rf1 = ROC.train.rf1,
+  ROC.test.rf1 = ROC.test.rf1,
+  ROC.train.rf2 = ROC.train.rf2,
+  ROC.test.rf2 = ROC.test.rf2,
+  ROC.train.rf3 = ROC.train.rf3,
+  ROC.test.rf3 = ROC.test.rf3
+) %>%
+  pROC::ggroc(alpha = 0.5, linetype = 1, size = 1) + 
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color = "grey", 
+               linetype = "dashed") +
+  labs(subtitle = paste0("Gini TRAIN: ",
+                          "rf = ", 
+                          round(100 * (2 * auc(ROC.train.rf1) - 1), 1), "%, ",
+                          "rf2 = ", 
+                          round(100 * (2 * auc(ROC.train.rf2) - 1), 1), "%, ",
+                          "rf3 = ", 
+                          round(100 * (2 * auc(ROC.train.rf3) - 1), 1), "%, ",
+                         "Gini TEST: ",
+                         "rf1 = ", 
+                         round(100 * (2 * auc(ROC.test.rf1) - 1), 1), "%, ",
+                         "rf2 = ", 
+                         round(100 * (2 * auc(ROC.test.rf2) - 1), 1), "%, ",
+                         "rf3 = ", 
+                         round(100 * (2 * auc(ROC.test.rf3) - 1), 1), "%, ")) +
+  theme_bw() + coord_fixed() +
+  scale_color_brewer(palette = "Paired")
+
+```
+For rf1 the Gini coefficient is 100% on the training set, which probably indicates overfitting. 
+The rf2 has a larger gini test compared to the rf3 but in turn the rf3 has a slightly higher gini train.
+
+
+Calculating accuracy, sensitivity, specificity and the Gini coefficient.
+```{r}
+
+getAccuracyAndGini(model = rf2, data = data_train,
+                   target_variable = "hospdead",
+                   predicted_class = "Yes")
+getAccuracyAndGini(model = rf2, data = data_test,
+                   target_variable = "hospdead",
+                   predicted_class = "Yes")
+getAccuracyAndGini(model = rf3, data = data_train,
+                   target_variable = "hospdead",
+                   predicted_class = "Yes")
+getAccuracyAndGini(model = rf3, data = data_test,
+                   target_variable = "hospdead",
+                   predicted_class = "Yes")
+
+
+```
+
+rf2 and rf3 have similar metrics but fot both training and testing set the model rf3 performs better than rf2 model and is less over-fitted than rf1.
+
+Final version of the model.
+```{r}
+
+rf_final <- rf3
+
+```
+
+
+Importance of predictors.
+```{r}
+
+varImpPlot(rf_final,
+           sort = TRUE,
+           main = "Importance of predictors",
+           n.var = 10,
+           type = 1) 
+
+```
+
+sfdm2 appears to be the most important predictor
+The next two important variables are avtisst and dnr
+dnrday, feat04, feat05, feat03 and charges also seem to be important
+
+
+### 2.3 Boosting of Decision Trees (XGBoost):
+  
+```{r}
+
+parameters_xgb <- expand.grid(nrounds = seq(20, 80, 10),
+                              max_depth = c(6),
+                              eta = c(0.25), 
+                              gamma = 1,
+                              colsample_bytree = c(0.2),
+                              min_child_weight = c(100),
+                              subsample = 0.8)
+
+ctrl_cv3 <- trainControl(method = "cv", 
+                         number = 3,
+                         classProbs = TRUE,
+                         summaryFunction = twoClassSummary)
+
+set.seed(123456789)
+xgb <- train(model_1,
+             data = data_train,
+             method = "xgbTree",
+             trControl = ctrl_cv3,
+             tuneGrid  = parameters_xgb)
+xgb
+
+```
+The best result has been obtained for nrounds = 60
+
+```{r}
+
+parameters_xgb2 <- expand.grid(nrounds = 60,
+                              max_depth = seq(5, 15, 2),
+                              eta = c(0.25), 
+                              gamma = 1,
+                              colsample_bytree = c(0.2),
+                              min_child_weight = seq(50, 100, 50),
+                              subsample = 0.8)
+
+set.seed(123456789)
+xgb2 <- train(model_1,
+              data = data_train,
+              method = "xgbTree",
+              trControl = ctrl_cv3,
+              tuneGrid  = parameters_xgb2)
+xgb2
+
+```
+The best result has been obtained for maxdepth = 13 and min_child_weight = 50.
+
+```{r}
+
+parameters_xgb3 <- expand.grid(nrounds = 60,
+                              max_depth = 13,
+                              eta = c(0.25), 
+                              gamma = 1,
+                              colsample_bytree = seq(0.1, 0.8, 0.1),
+                              min_child_weight = 50,
+                              subsample = 0.8)
+set.seed(123456789)
+xgb3 <- train(model_1,
+                      data = data_train,
+                      method = "xgbTree",
+                      trControl = ctrl_cv3,
+                      tuneGrid  = parameters_xgb3)
+xgb3
+
+```
+The best result has been obtained for colsample_bytree = 0.4.
+
+```{r}
+
+parameters_xgb4 <- expand.grid(nrounds = 60,
+                              max_depth = 13,
+                              eta = c(0.25), 
+                              gamma = 1,
+                              colsample_bytree = 0.4,
+                              min_child_weight = 50,
+                              subsample = c(0.5, 0.6, 0.7, 0.8, 0.9))
+
+set.seed(123456789)
+xgb4 <- train(model_1,
+                      data = data_train,
+                      method = "xgbTree",
+                      trControl = ctrl_cv3,
+                      tuneGrid  = parameters_xgb4)
+xgb4
+
+```
+The best result has been obtained for subsample = 0.9.
+
+Next is to lower learning rate by half (up to 0.12), and double the number of trees.
+```{r}
+
+parameters_xgb5 <- expand.grid(nrounds = 120,
+                              max_depth = 13,
+                              eta = 0.12, 
+                              gamma = 1,
+                              colsample_bytree = 0.4,
+                              min_child_weight = 50,
+                              subsample = 0.9)
+
+set.seed(123456789)
+xgb5 <- train(model_1,
+                      data = data_train,
+                      method = "xgbTree",
+                      trControl = ctrl_cv3,
+                      tuneGrid  = parameters_xgb5)
+xgb5
+
+```
+
+Next is to lower learning rate by half (up to 0.06), and double the number of trees.
+```{r}
+
+parameters_xgb6 <- expand.grid(nrounds = 240,
+                              max_depth = 13,
+                              eta = 0.06, 
+                              gamma = 1,
+                              colsample_bytree = 0.4,
+                              min_child_weight = 50,
+                              subsample = 0.9)
+
+set.seed(123456789)
+xgb6 <- train(model_1,
+                      data = data_train,
+                      method = "xgbTree",
+                      trControl = ctrl_cv3,
+                      tuneGrid  = parameters_xgb6)
+xgb6
+
+```
+
+Now, we will compare estimated the models.
+```{r}
+
+(models <- c("", "2":"6"))
+
+sapply(paste0("xgb", models),
+       function(x) getAccuracyAndGini(model = get(x),
+                                      data = data_train,
+                                      target_variable = "hospdead",
+                                      predicted_class = "Yes")
+)
+sapply(paste0("xgb", models),
+       function(x) getAccuracyAndGini(model = get(x),
+                                      data = data_test,
+                                      target_variable = "hospdead",
+                                      predicted_class = "Yes")
+)
+
+```
+
+```{r}
+
+ROC.train.xgb <- pROC::roc(data_train$hospdead, predict(xgb, data_train, 
+                                                        type = "prob")[, "Yes"])
+ROC.test.xgb <- pROC::roc(data_test$hospdead, predict(xgb, data_test, 
+                                                        type = "prob")[, "Yes"])
+ROC.train.xgb5 <- pROC::roc(data_train$hospdead, predict(xgb5, data_train, 
+                                                        type = "prob")[, "Yes"])
+ROC.test.xgb5 <- pROC::roc(data_test$hospdead, predict(xgb5, data_test, 
+                                                        type = "prob")[, "Yes"])
+ROC.train.xgb6 <- pROC::roc(data_train$hospdead, predict(xgb6, data_train, 
+                                                        type = "prob")[, "Yes"])
+ROC.test.xgb6 <- pROC::roc(data_test$hospdead, predict(xgb6, data_test, 
+                                                        type = "prob")[, "Yes"])
+
+
+list(
+  ROC.train.xgb  = ROC.train.xgb,
+  ROC.test.xgb   = ROC.test.xgb,
+  ROC.train.xgb5  = ROC.train.xgb5,
+  ROC.test.xgb5   = ROC.test.xgb5,
+  ROC.train.xgb6 = ROC.train.xgb6,
+  ROC.test.xgb6 = ROC.test.xgb6
+) %>%
+  pROC::ggroc(alpha = 0.5, linetype = 1, size = 1) + 
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color = "grey", 
+               linetype = "dashed") +
+  labs(subtitle = paste0("Gini TRAIN: ",
+                         "xgb = ", 
+                         round(100 * (2 * auc(ROC.train.xgb) - 1), 1), "%, ",
+                         "xgb5 = ", 
+                         round(100 * (2 * auc(ROC.train.xgb5) - 1), 1), "%, ",
+                         "xgb6 = ", 
+                         round(100 * (2 * auc(ROC.train.xgb6) - 1), 1), "%, ",
+                         "\nGini TEST: ",
+                         "xgb = ", 
+                         round(100 * (2 * auc(ROC.test.xgb) - 1), 1), "%, ",
+                         "xgb5 = ", 
+                         round(100 * (2 * auc(ROC.test.xgb5) - 1), 1), "% ",
+                         "xgb6 = ", 
+                         round(100 * (2 * auc(ROC.test.xgb6) - 1), 1), "% ")) +
+  theme_bw() + coord_fixed() +
+  scale_color_brewer(palette = "Paired")
+
+```
+
+The xgb6 model has a slightly higher Gini coefficient and other metrics especially on training datasets.
+
+Importance of predictors.
+```{r}
+
+xgb_final <- xgb6$finalModel
+
+importance_matrix <- xgb.importance(
+  feature_names = colnames(data_train[, -which(names(data_train) == "hospdead")]), 
+  model = xgb_final
+)
+
+top_n_importance_matrix <- importance_matrix[order(-importance_matrix$Gain), ][1:10,]
+
+xgb.plot.importance(top_n_importance_matrix)
+```
+
+sfdm2 appears to be the most important predictor
+The next two important variables are dnr and avtisst
+dnrday, prg6m, feat04, feat05, feat03 and charges also seem to be important
+
+## 3. Conclusions
+
+For this problem we trained **three individual machine learning algorithms**:
+- Decision Tree (Gini train = 95.3%, Gini test = 90.5%),
+- Random Forest (Gini train = 98.5%, Gini test = 93.3%), 
+- XGBoost (Gini train = 97.3%, Gini test = 94.3%).
+
+
+```{r}
+
+list(
+  'Decision tree (train)' = ROC.train_tree_5,
+  'Decision tree (test)' = ROC.test.tree_5,
+  'Random Forest (train)' = ROC.train.rf3,
+  'Random Forest (test)' = ROC.test.rf3,
+  'XGBoost (train)' = ROC.train.xgb6,
+  'XGBoost (test)' = ROC.test.xgb6
+) %>%
+  pROC::ggroc(alpha = 0.5, linetype = 1, size = 1) + 
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color = "grey", 
+               linetype = "dashed") +
+  labs(subtitle = paste0("Gini TRAIN: ",
+                         "Decision tree = ", 
+                         round(100*(2 * auc(ROC.train_tree_5) - 1), 1), "%, ", 
+                          "Random Forest = ", 
+                          round(100 * (2 * auc(ROC.train.rf3) - 1), 1), "%, ",
+                         "XGBoost = ", 
+                         round(100 * (2 * auc(ROC.train.xgb6) - 1), 1), "%, ",
+                         "\nGini TEST: ",
+                         "Decision tree = ", 
+                         round(100*(2 * auc(ROC.test.tree_5) - 1), 1), "%, " ,
+                         "Random Forest = ", 
+                         round(100 * (2 * auc(ROC.test.rf3) - 1), 1), "%, ",
+                         "XGBoost = ", 
+                         round(100 * (2 * auc(ROC.test.xgb6) - 1), 1), "% ")) +
+  theme_bw() + coord_fixed() +
+  scale_color_brewer(palette = "Paired")
+
+```
+
+Based on values of Gini coefficient and plot, we can see that Random Forest has higher score for training set than XGboost and Decision tree, but for the training sample XGBoost score is the best. From the plot we can see that Random forest is slightly better for training set than the rest, and for testing sample XGboost and Random Forest are quite similar and both are better then Decision tree.
+
+Creating predictions on validation set
+```{r}
+
+predictions <- predict(rf_final, newdata = data_validation)
+
+actuals <- data_validation$hospdead
+comparison <- table(actuals, predictions)
+
+# Calculate the proportion of correct predictions
+accuracy <- sum(diag(comparison)) / sum(comparison)
+
+print(accuracy)
+print(comparison)
+
+# write.csv(predictions, file = "Predictions.csv", row.names = FALSE)
+
+```
+

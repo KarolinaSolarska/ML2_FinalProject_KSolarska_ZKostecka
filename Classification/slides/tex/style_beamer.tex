@@ -1,0 +1,42 @@
+\definecolor{wne}{RGB}{153,53,32}  % kolor WNE
+
+\definecolor{my_footer}{RGB}{189,215,238}  % kolor WNE
+
+\setbeamercolor{wne_footer}{fg = black, bg=my_footer}
+
+\setbeamercolor{title}{fg=wne}
+\setbeamercolor{frametitle}{fg=wne}
+
+\usepackage{tikz}
+
+\addtobeamertemplate{frametitle}{}{%
+\begin{tikzpicture}[remember picture,overlay]
+\node[anchor=south west, yshift = 5pt] at (current page.south west) {\includegraphics[height=0.6cm]{img/wne_logo2017.png}};
+\node[anchor=south east, yshift = 5pt] at (current page.south east) {\includegraphics[height=0.6cm]{img/logo_R.png}};
+\end{tikzpicture}}
+
+% ADD bar with sections above header
+\setbeamertemplate{headline}{%
+\leavevmode%
+  \hbox{%
+    \begin{beamercolorbox}[wd=\paperwidth,ht=2.5ex,dp=1.125ex]{wne_footer}%
+    \center{MA in Data Science and Business Analytics}
+    \end{beamercolorbox}%
+  }
+}
+
+\makeatletter
+\setbeamertemplate{footline}
+{
+  \leavevmode%
+  \hbox{%
+  \begin{beamercolorbox}[wd=.85\paperwidth,ht=2.25ex,dp=1ex,center]{wne_footer}%
+    \center{Academic year 2023/2024,~\insertshorttitle,~\insertshortauthor}
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.15\paperwidth,ht=2.25ex,dp=1ex,right]{wne_footer}%
+    \insertframenumber{} / \inserttotalframenumber\hspace*{2ex} 
+  \end{beamercolorbox}}%
+  \vskip0pt%
+}
+\makeatother
+
